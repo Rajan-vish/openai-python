@@ -5,7 +5,7 @@ import re
 import json
 import inspect
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Iterator, Optional, AsyncIterator, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Iterator, Optional, AsyncIterator, AsyncGenerator, cast
 from typing_extensions import Self, Protocol, TypeGuard, override, get_origin, runtime_checkable
 
 import httpx2
@@ -162,18 +162,26 @@ class AsyncStream(Generic[_T]):
     async def __anext__(self) -> _T:
         return await self._iterator.__anext__()
 
-    async def __aiter__(self) -> AsyncIterator[_T]:
-        async for item in self._iterator:
-            yield item
+    def __aiter__(self) -> AsyncIterator[_T]:
+        return self
 
     async def _iter_events(self) -> AsyncIterator[ServerSentEvent]:
+        body = self.response.aiter_bytes()
+        events = self._decoder.aiter_bytes(body)
         try:
-            async for sse in self._decoder.aiter_bytes(self.response.aiter_bytes()):
+            async for sse in events:
                 yield sse
         except timeout_exceptions() as err:
             raise APITimeoutError(request=self.response.request) from err
         except request_exceptions() as err:
             raise APIConnectionError(request=self.response.request) from err
+        finally:
+            try:
+                if isinstance(events, AsyncGenerator):
+                    await events.aclose()
+            finally:
+                if hasattr(body, "aclose"):
+                    await body.aclose()
 
     async def __stream__(self) -> AsyncIterator[_T]:
         cast_to = cast(Any, self._cast_to)
@@ -235,7 +243,11 @@ class AsyncStream(Generic[_T]):
                     )
         finally:
             # Ensure the response is closed even if the consumer doesn't read all data
-            await response.aclose()
+            try:
+                if isinstance(iterator, AsyncGenerator):
+                    await iterator.aclose()
+            finally:
+                await response.aclose()
 
     async def __aenter__(self) -> Self:
         return self
@@ -254,7 +266,11 @@ class AsyncStream(Generic[_T]):
 
         Automatically called if the response body is read to completion.
         """
-        await self.response.aclose()
+        try:
+            if hasattr(self._iterator, "aclose"):
+                await self._iterator.aclose()
+        finally:
+            await self.response.aclose()
 
     async def aclose(self) -> None:
         """Close the response and release the connection. Alias for `close()`."""

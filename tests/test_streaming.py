@@ -584,6 +584,38 @@ async def test_async_stream_aclosing(raise_error: bool) -> None:
         assert response.is_closed
 
 
+@pytest.mark.asyncio
+async def test_async_stream_closes_iterators_on_early_break(async_client: AsyncOpenAI) -> None:
+    body_closed = False
+    generator_closed = False
+
+    class Body(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            try:
+                yield (
+                    b'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":0,'
+                    b'"model":"test-model","choices":[{"index":0,"delta":{"content":"hello"},'
+                    b'"finish_reason":null}]}\n\n'
+                )
+                yield b"data: [DONE]\n\n"
+            finally:
+                nonlocal generator_closed
+                generator_closed = True
+
+        async def aclose(self) -> None:
+            nonlocal body_closed
+            body_closed = True
+
+    response = httpx2.Response(200, stream=Body(), headers={"content-type": "text/event-stream"})
+    async with AsyncStream(cast_to=object, client=async_client, response=response) as stream:
+        async for _ in stream:
+            break
+
+    assert response.is_closed
+    assert body_closed
+    assert generator_closed
+
+
 async def to_aiter(iter: Iterator[bytes]) -> AsyncIterator[bytes]:
     for chunk in iter:
         yield chunk
